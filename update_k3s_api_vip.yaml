@@ -1,7 +1,7 @@
 - name: Reemplazar endpoint API por IP VIP en nodos master
   hosts: masters
   become: true
-  gather_facts: yes
+  gather_facts: no
   vars:
     api_vip: "https://10.17.5.10:6443"
 
@@ -12,8 +12,8 @@
       ignore_errors: true
 
     - name: Verificar si existe el archivo k3s.yaml
-      ansible.builtin.stat:
-        path: /etc/rancher/k3s/k3s.yaml
+      ansible.builtin.raw: |
+        if [ -f /etc/rancher/k3s/k3s.yaml ]; then echo "El archivo k3s.yaml existe"; else echo "El archivo k3s.yaml no existe"; fi
       register: k3s_yaml_status
 
     - name: Reemplazar IP del API server en k3s.yaml
@@ -21,11 +21,11 @@
         if [ -f /etc/rancher/k3s/k3s.yaml ]; then
           sed -i 's|^server:.*|server: {{ api_vip }}|' /etc/rancher/k3s/k3s.yaml;
         fi
-      when: k3s_yaml_status.stat.exists
+      when: k3s_yaml_status.stdout == "El archivo k3s.yaml existe"
 
     - name: Reiniciar k3s en nodos master
       ansible.builtin.raw: |
         if systemctl is-active --quiet k3s; then
           systemctl restart k3s;
         fi
-      when: k3s_yaml_status.stat.exists
+      when: k3s_yaml_status.stdout == "El archivo k3s.yaml existe"
