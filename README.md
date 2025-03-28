@@ -1,19 +1,29 @@
+# update_k3s_api_vip_ansible
 
-# Update K3s API VIP with Ansible
-This Ansible playbook updates the K3s API VIP address in a K3s cluster. It is designed to be run on a control node that has access to the K3s cluster.
+Este repositorio contiene un playbook de Ansible para actualizar la IP del endpoint del API de K3s en los nodos master de un clúster de Kubernetes.
 
-## clone the repository
+## Requisitos
 
+- Tener Ansible instalado en el sistema donde se ejecutará el playbook.
+- Acceso SSH a los nodos del clúster con privilegios adecuados.
+- Clúster de Kubernetes K3s en funcionamiento.
 
+## Uso
 
-```bash
-git clone https://github.com/vhgalvez/update_k3s_api_vip_ansible.git
-cd update_k3s_api_vip_ansible
+1. Clona el repositorio:
+    ```bash
+    git clone https://github.com/vhgalvez/update_k3s_api_vip_ansible.git
+    ```
 
-```
-## Install Ansible
+2. Modifica el archivo `inventory.ini` con la información de tu infraestructura.
 
+3. Ejecuta el playbook:
+    ```bash
+    ansible-playbook -i inventory.ini playbook_update_k3s_api_vip.yml
+    ```
 
-```bash
-sudo ansible-playbook -i inventory.ini update_k3s_api_vip.yaml
-```
+Esto actualizará el archivo `k3s.yaml` en los nodos master y cambiará el endpoint del API por la nueva IP VIP.
+
+## Contribuciones
+
+Si deseas contribuir, por favor haz un fork del repositorio y envía un pull request.
