@@ -1,0 +1,54 @@
+---
+- name: Regenerar certificados del API server de Kubernetes y reiniciar servicios
+  hosts: masters
+  become: true
+  tasks:
+
+    - name: Detener el servicio K3s
+      ansible.builtin.systemd:
+        name: k3s
+        state: stopped
+
+    - name: Eliminar los certificados antiguos de K3s
+      ansible.builtin.file:
+        path: "/etc/rancher/k3s"
+        state: absent
+      ignore_errors: true
+
+    - name: Regenerar los certificados de K3s con la IP VIP
+      ansible.builtin.command:
+        cmd: "/usr/local/bin/k3s server --tls-san 10.17.5.10"
+      args:
+        creates: "/etc/rancher/k3s/k3s.yaml"
+
+    - name: Reiniciar el servicio K3s
+      ansible.builtin.systemd:
+        name: k3s
+        state: started
+
+    - name: Verificar el estado del servicio K3s
+      ansible.builtin.systemd:
+        name: k3s
+        state: started
+      register: k3s_service_status
+
+    - name: Asegurar que K3s está activo
+      ansible.builtin.fail:
+        msg: "K3s no se pudo iniciar correctamente."
+      when: k3s_service_status.status.active != "active"
+
+    - name: Reiniciar HAProxy y Keepalived
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - haproxy
+        - keepalived
+
+    - name: Verificar el estado de los servicios HAProxy y Keepalived
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - haproxy
+        - keepalived

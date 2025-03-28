@@ -24,6 +24,13 @@ Este repositorio contiene un playbook de Ansible para actualizar la IP del endpo
 
 
 
+
+   ```bash
+sudo sed -i 's|server: https://127.0.0.1:6443|server: https://10.17.5.10:6443|' /etc/rancher/k3s/k3s.yam
+```
+
+
+
 Esto actualizará el archivo `k3s.yaml` en los nodos master y cambiará el endpoint del API por la nueva IP VIP.
 
 ## Contribuciones
