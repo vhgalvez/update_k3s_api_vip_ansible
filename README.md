@@ -16,13 +16,7 @@ Este repositorio contiene un playbook de Ansible para actualizar la IP del endpo
     cd update_k3s_api_vip_ansible
     ```
 
-2. install pypy Python si no lo tienes instalado:
-
-    ```bash
-    ansible-playbook -i inventory.ini install_pypy.yaml
-    ```
-
-3. Ejecuta el playbook:
+2. Ejecuta el playbook:
  
     ```bash
     ansible-playbook -i inventory.ini playbook_update_k3s_api_vip.yml

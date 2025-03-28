@@ -30,8 +30,8 @@
         fi
       when: k3s_yaml_status.stdout == "El archivo k3s.yaml existe"
 
-    # Forzar reinicio de k3s si no se detectó
+    # Forzar reinicio de k3s en todos los casos, incluso si no se detectó el archivo
     - name: Forzar reinicio de k3s en todos los casos
       ansible.builtin.raw: |
         systemctl restart k3s
-      when: k3s_yaml_status.stdout == "El archivo k3s.yaml existe"
+      when: k3s_yaml_status.stdout != "El archivo k3s.yaml existe"
