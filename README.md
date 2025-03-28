@@ -13,14 +13,22 @@ Este repositorio contiene un playbook de Ansible para actualizar la IP del endpo
 1. Clona el repositorio:
     ```bash
     git clone https://github.com/vhgalvez/update_k3s_api_vip_ansible.git
+    cd update_k3s_api_vip_ansible
     ```
 
-2. Modifica el archivo `inventory.ini` con la información de tu infraestructura.
+2. install pypy Python si no lo tienes instalado:
+
+    ```bash
+    ansible-playbook -i inventory.ini install_pypy.yaml
+    ```
 
 3. Ejecuta el playbook:
+ 
     ```bash
     ansible-playbook -i inventory.ini playbook_update_k3s_api_vip.yml
     ```
+
+
 
 Esto actualizará el archivo `k3s.yaml` en los nodos master y cambiará el endpoint del API por la nueva IP VIP.
 
