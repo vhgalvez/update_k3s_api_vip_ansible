@@ -10,16 +10,22 @@
     k3s_service_path: "/etc/systemd/system/k3s.service"
 
   tasks:
-
     - name: Asegurar que el kubeconfig apunte a la VIP (solo en masters)
       raw: |
         sed -i 's|server: https://127.0.0.1:6443|server: https://{{ vip_ip }}:6443|' {{ kubeconfig_path }}
       when: inventory_hostname in groups['masters']
 
-    - name: Agregar --tls-san {{ vip_ip }} si no existe en k3s.service
+    - name: Asegurar que el kubeconfig apunte a la VIP (también en workers y storage si existe)
       raw: |
-        grep -q -- "--tls-san {{ vip_ip }}" {{ k3s_service_path }} || \
-        sed -i "/ExecStart=/ s|\\(--tls-san [^ ]\\+\\)|\\1 --tls-san {{ vip_ip }}|" {{ k3s_service_path }}
+        if [ -f {{ kubeconfig_path }} ]; then
+          sed -i 's|server: https://127.0.0.1:6443|server: https://{{ vip_ip }}:6443|' {{ kubeconfig_path }}
+        fi
+      when: inventory_hostname in groups['workers'] or inventory_hostname in groups['storage']
+
+    - name: Agregar --tls-san {{ vip_ip }} en masters si no existe
+      raw: |
+        grep -q "--tls-san {{ vip_ip }}" {{ k3s_service_path }} || \
+        sed -i "/ExecStart=/ s|\\(--tls-san [^ ]\+\)|\1 --tls-san {{ vip_ip }}|" {{ k3s_service_path }}
       when: inventory_hostname in groups['masters']
 
     - name: Eliminar certificados TLS para regenerarlos con la nueva VIP
@@ -27,7 +33,7 @@
         rm -rf /var/lib/rancher/k3s/server/tls
       when: inventory_hostname in groups['masters']
 
-    - name: Recargar y reiniciar K3s (solo masters)
+    - name: Recargar y reiniciar k3s
       raw: |
         systemctl daemon-reexec
         systemctl daemon-reload
