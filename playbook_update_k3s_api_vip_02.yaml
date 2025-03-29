@@ -10,7 +10,6 @@
     k3s_service_path: "/etc/systemd/system/k3s.service"
 
   tasks:
-
     - name: Cambiar endpoint en kubeconfig a la VIP (todos los nodos si existe)
       raw: |
         if [ -f "{{ kubeconfig_path }}" ]; then
@@ -21,6 +20,12 @@
       raw: |
         grep -q -- "--tls-san {{ vip_ip }}" {{ k3s_service_path }} || \
         sed -i "/ExecStart=/ s|\\(--tls-san [^ ]\\+\\)|\\1 --tls-san {{ vip_ip }}|" {{ k3s_service_path }}
+      when: inventory_hostname in groups['masters']
+
+    - name: Añadir --advertise-address y --node-external-ip a la configuración de k3s en los masters
+      raw: |
+        grep -q -- "--advertise-address {{ vip_ip }}" {{ k3s_service_path }} || \
+        sed -i "/ExecStart=/ s|\\(ExecStart=[^ ]\\+\\)|\\1 --advertise-address {{ vip_ip }} --node-external-ip {{ vip_ip }}|" {{ k3s_service_path }}
       when: inventory_hostname in groups['masters']
 
     - name: Eliminar certificados TLS en masters para regeneración con VIP
@@ -36,7 +41,7 @@
         systemctl restart k3s
       when: inventory_hostname in groups['masters']
 
-    - name: Esperar a que API esté disponible por VIP
+    - name: Esperar a que la API esté disponible por VIP
       raw: |
         for i in $(seq 1 60); do
           curl -k --max-time 1 https://{{ vip_ip }}:6443/version >/dev/null 2>&1 && exit 0
@@ -55,6 +60,6 @@
       register: check_kubeconfig
       changed_when: false
 
-    - name: Mostrar resultado
+    - name: Mostrar resultado de la verificación del kubeconfig
       debug:
         var: check_kubeconfig.stdout_lines
