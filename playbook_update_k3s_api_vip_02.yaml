@@ -1,3 +1,14 @@
+---
+- name: Reemplazar endpoint API por IP VIP y reiniciar K3s
+  hosts: k8s_cluster
+  become: true
+  gather_facts: false
+
+  vars:
+    vip_ip: "10.17.5.10"
+    kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
+    k3s_service_path: "/etc/systemd/system/k3s.service"
+
   tasks:
     - name: Asegurar que el kubeconfig apunte a la VIP (solo en masters)
       raw: |
@@ -29,7 +40,7 @@
       changed_when: false
       when: inventory_hostname in groups['masters']
 
-    - name: Mostrar resultado de verificacion
+    - name: Mostrar resultado de verificación
       debug:
         var: check_kubeconfig.stdout_lines
       when: inventory_hostname in groups['masters']
