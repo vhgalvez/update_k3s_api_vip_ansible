@@ -1,0 +1,43 @@
+---
+- name: Reemplazar endpoint API por IP VIP y regenerar certificados en todos los nodos
+  hosts: k8s_cluster
+  become: true
+  gather_facts: false
+
+  vars:
+    api_vip: "https://10.17.5.10:6443"
+
+  tasks:
+    - name: Hacer copia de seguridad de k3s.yaml si existe
+      ansible.builtin.raw: |
+        if [ -f /etc/rancher/k3s/k3s.yaml ]; then cp /etc/rancher/k3s/k3s.yaml /etc/rancher/k3s/k3s.yaml.bak; fi
+      ignore_errors: true
+
+    - name: Verificar si existe el archivo k3s.yaml
+      ansible.builtin.raw: |
+        if [ -f /etc/rancher/k3s/k3s.yaml ]; then echo "El archivo k3s.yaml existe"; else echo "El archivo k3s.yaml no existe"; fi
+      register: k3s_yaml_status
+
+    - name: Reemplazar IP del API server en k3s.yaml por la VIP
+      ansible.builtin.raw: |
+        sed -i 's|^server:.*|server: {{ api_vip }}|' /etc/rancher/k3s/k3s.yaml
+      when: "'El archivo k3s.yaml existe' in k3s_yaml_status.stdout"
+
+    - name: Regenerar certificados en nodos master
+      ansible.builtin.raw: |
+        mkdir -p /etc/kubernetes/pki && k3s certificate rotate --certs-dir /etc/kubernetes/pki
+      when: inventory_hostname in groups['masters']
+
+    - name: Reiniciar servicio k3s para aplicar cambios
+      ansible.builtin.raw: |
+        systemctl restart k3s
+      when: "'El archivo k3s.yaml existe' in k3s_yaml_status.stdout"
+
+    - name: Validar conectividad con el API Server por la VIP (solo masters)
+      ansible.builtin.raw: |
+        kubectl get nodes
+      register: resultado
+      until: resultado.rc == 0
+      retries: 5
+      delay: 10
+      when: inventory_hostname in groups['masters']
