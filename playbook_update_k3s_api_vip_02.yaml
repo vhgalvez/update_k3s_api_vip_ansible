@@ -7,39 +7,33 @@
   tasks:
 
     - name: Verificar si existe el archivo k3s.yaml
-      ansible.builtin.raw: |
-        if [ -f /etc/rancher/k3s/k3s.yaml ]; then
-          echo "exists"
-        else
-          echo "missing"
-        fi
+      ansible.builtin.command: test -f /etc/rancher/k3s/k3s.yaml
       register: k3s_yaml_status
-      changed_when: false
+      ignore_errors: true
 
     - name: Copia de seguridad de k3s.yaml si existe
-      ansible.builtin.raw: |
-        cp /etc/rancher/k3s/k3s.yaml /etc/rancher/k3s/k3s.yaml.bak
-      when: "'exists' in k3s_yaml_status.stdout"
+      ansible.builtin.command: cp /etc/rancher/k3s/k3s.yaml /etc/rancher/k3s/k3s.yaml.bak
+      when: k3s_yaml_status.rc == 0
 
     - name: Reemplazar IP del API server en k3s.yaml
-      ansible.builtin.raw: |
+      ansible.builtin.command: >
         sed -i 's|server: .*|server: https://10.17.5.10:6443|' /etc/rancher/k3s/k3s.yaml
-      when: "'exists' in k3s_yaml_status.stdout"
+      when: k3s_yaml_status.rc == 0
 
-    - name: Regenerar todos los certificados en nodos master
-      ansible.builtin.raw: |
-        /opt/bin/k3s certificate rotate --force
+    - name: Regenerar certificados en masters
+      ansible.builtin.command: /opt/bin/k3s certificate rotate --force
       when: inventory_hostname in groups['masters']
 
     - name: Reiniciar servicio k3s o k3s-agent
-      ansible.builtin.raw: |
+      ansible.builtin.shell: |
         if systemctl list-units --full -all | grep -q 'k3s-agent.service'; then
           systemctl restart k3s-agent
         else
           systemctl restart k3s
         fi
+      args:
+        executable: /bin/sh
 
-    - name: Validar conexión al API Server por la IP VIP (solo masters)
-      ansible.builtin.raw: |
-        curl -sk https://10.17.5.10:6443/version || exit 1
+    - name: Validar conexión al API Server por VIP (solo masters)
+      ansible.builtin.command: curl -sk https://10.17.5.10:6443/version
       when: inventory_hostname in groups['masters']
