@@ -5,7 +5,7 @@
   gather_facts: false
 
   vars:
-    vip_ip: "{{ api_vip | default('10.17.5.10') }}"
+    vip_ip: "{{ api_vip | default('10.17.15.10') }}"  # Usar la IP VIP proporcionada o la predeterminada
     k3s_service_path: "/etc/systemd/system/k3s.service"
     agent_service_path: "/etc/systemd/system/k3s-agent.service"
     kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
