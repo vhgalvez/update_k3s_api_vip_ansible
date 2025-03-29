@@ -6,31 +6,42 @@
 
   vars:
     vip_ip: "{{ api_vip | default('10.17.5.10') }}"
-    kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
     k3s_service_path: "/etc/systemd/system/k3s.service"
     agent_service_path: "/etc/systemd/system/k3s-agent.service"
+    kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
     primer_master: "{{ groups['masters'][0] }}"
 
   tasks:
 
+    # --- SOLO PRIMER MASTER ---
     - name: "📌 Verificar si es el primer master"
       debug:
         msg: "Soy el primer master"
       when: inventory_hostname == primer_master
 
-    #################################################################
-    #                         FASE 1 - MASTER 1                    #
-    #################################################################
+    - name: "🔄 Reconstruir archivo k3s.service en primer master"
+      copy:
+        dest: "{{ k3s_service_path }}"
+        content: |
+          [Unit]
+          Description=Lightweight Kubernetes
+          Wants=network-online.target
+          After=network-online.target
 
-    - name: "➕ Añadir --tls-san VIP si no está presente (primer master)"
-      raw: |
-        grep -q -- "--tls-san {{ vip_ip }}" {{ k3s_service_path }} || \
-        sed -i "/ExecStart=/ s|\\(--tls-san [^ ]\\+\\)|\\1 --tls-san {{ vip_ip }}|" {{ k3s_service_path }}
-      when: inventory_hostname == primer_master
+          [Service]
+          Type=notify
+          ExecStartPre=-/sbin/modprobe br_netfilter
+          ExecStartPre=-/sbin/modprobe overlay
+          ExecStart=/opt/bin/k3s server --cluster-init --tls-san {{ inventory_hostname }} --tls-san {{ vip_ip }} --write-kubeconfig /etc/rancher/k3s/k3s.yaml --write-kubeconfig-mode 644
+          Restart=always
+          KillMode=process
+          Delegate=yes
+          LimitNOFILE=1048576
+          LimitNPROC=infinity
+          LimitCORE=infinity
 
-    - name: "❌ Eliminar --advertise-address (si existe)"
-      raw: |
-        sed -i "/ExecStart=/ s| --advertise-address [^ ]*||" {{ k3s_service_path }}
+          [Install]
+          WantedBy=multi-user.target
       when: inventory_hostname == primer_master
 
     - name: "🧹 Borrar certificados TLS (regeneración)"
@@ -49,19 +60,16 @@
     - name: "⏳ Esperar que API responda por VIP (primer master)"
       raw: |
         for i in $(seq 1 60); do
-          curl -sk https://{{ vip_ip }}:6443/version >/dev/null && exit 0
+          curl -k --max-time 1 https://{{ vip_ip }}:6443/version >/dev/null 2>&1 && exit 0
           sleep 1
         done
         echo "❌ La API en {{ vip_ip }}:6443 no respondió en 60s"
       when: inventory_hostname == primer_master
 
-    #################################################################
-    #                  FASE 2 - AGENTES (workers, storage)         #
-    #################################################################
-
+    # --- WORKERS Y STORAGE ---
     - name: "📝 Reemplazar IP del API server en k3s-agent.service"
       raw: |
-        sed -i "s|--server https://[^ ]\\+|--server https://{{ vip_ip }}:6443|" {{ agent_service_path }}
+        sed -i "s|--server https://[^ ]\+|--server https://{{ vip_ip }}:6443|" {{ agent_service_path }}
       when: inventory_hostname not in groups['masters']
 
     - name: "♻️ Reiniciar k3s-agent"
@@ -76,14 +84,11 @@
         systemctl is-active k3s-agent || echo "❌ El agente k3s no está activo"
       when: inventory_hostname not in groups['masters']
 
-    #################################################################
-    #                    FASE 3 - Otros masters                     #
-    #################################################################
-
+    # --- RESTO DE MASTERS ---
     - name: "➕ Añadir --tls-san en los demás masters"
       raw: |
         grep -q -- "--tls-san {{ vip_ip }}" {{ k3s_service_path }} || \
-        sed -i "/ExecStart=/ s|\\(--tls-san [^ ]\\+\\)|\\1 --tls-san {{ vip_ip }}|" {{ k3s_service_path }}
+        sed -i "/ExecStart=/ s|\(--tls-san [^ ]\+\)|\1 --tls-san {{ vip_ip }}|" {{ k3s_service_path }}
       when: inventory_hostname in groups['masters'] and inventory_hostname != primer_master
 
     - name: "🧹 Borrar TLS para regeneración (otros masters)"
@@ -99,20 +104,19 @@
         systemctl restart k3s
       when: inventory_hostname in groups['masters'] and inventory_hostname != primer_master
 
-    #################################################################
-    #                 FASE FINAL - Verificación                    #
-    #################################################################
-
-    - name: "🔍 Verificar kubeconfig usa VIP (si existe)"
+    # --- VERIFICACIÓN SOLO EN MASTERS ---
+    - name: "🔍 Verificar si kubeconfig usa la VIP (solo en masters)"
       raw: |
         if [ -f "{{ kubeconfig_path }}" ]; then
           grep 'server: https://{{ vip_ip }}:6443' "{{ kubeconfig_path }}" || echo "❌ kubeconfig sin VIP"
         else
           echo "⚠️ No existe kubeconfig (normal en agentes)"
         fi
+      when: inventory_hostname in groups['masters']
       register: resultado_kubeconfig
       changed_when: false
 
     - name: "📤 Mostrar resultado de verificación"
       debug:
         var: resultado_kubeconfig.stdout_lines
+      when: inventory_hostname in groups['masters']
