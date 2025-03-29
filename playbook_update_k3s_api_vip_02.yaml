@@ -1,44 +1,44 @@
 ---
 - name: Reemplazar endpoint API por IP VIP y reiniciar K3s
-  hosts: masters
+  hosts: k8s_cluster
+  become: true
   gather_facts: false
+
   vars:
     vip_ip: "10.17.5.10"
+    kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
+    k3s_service_path: "/etc/systemd/system/k3s.service"
+    k3s_tls_path: "/var/lib/rancher/k3s/server/tls"
+
   tasks:
-    - name: Agregar --tls-san VIP al ExecStart en k3s.service si no existe
-      raw: >
-        grep -q -- '--tls-san {{ vip_ip }}' /etc/systemd/system/k3s.service || \
-        sed -i '/ExecStart=/ s|\\(--tls-san [^ ]*\\)|\\1 --tls-san {{ vip_ip }}|' /etc/systemd/system/k3s.service
+    - name: Asegurar que el kubeconfig apunte a la VIP
+      raw: |
+        sed -i 's|server: https://127.0.0.1:6443|server: https://{{ vip_ip }}:6443|' {{ kubeconfig_path }}
+      when: inventory_hostname in groups['masters'] or inventory_hostname in groups['workers'] or inventory_hostname in groups['storage']
 
-    - name: Reemplazar IP en k3s.yaml por la VIP
-      raw: >
-        sed -i 's|server: https://.*:6443|server: https://{{ vip_ip }}:6443|' /etc/rancher/k3s/k3s.yaml
+    - name: Agregar --tls-san {{ vip_ip }} en masters si no existe
+      raw: |
+        grep -q "--tls-san {{ vip_ip }}" {{ k3s_service_path }} || \
+        sed -i "/ExecStart=/ s|\\(--tls-san [^ ]\+\)|\1 --tls-san {{ vip_ip }}|" {{ k3s_service_path }}
+      when: inventory_hostname in groups['masters']
 
-    - name: Reiniciar K3s correctamente
+    - name: Eliminar certificados TLS para regenerarlos con la nueva VIP
+      raw: |
+        rm -rf {{ k3s_tls_path }}
+      when: inventory_hostname in groups['masters']
+
+    - name: Recargar y reiniciar k3s
       raw: |
         systemctl daemon-reexec
         systemctl daemon-reload
         systemctl restart k3s
 
-    - name: Verificar API con curl (401 esperado)
+    - name: Verificar si el archivo k3s.yaml tiene la VIP
       raw: |
-        curl -k https://{{ vip_ip }}:6443 || true
+        grep 'server: https://{{ vip_ip }}:6443' {{ kubeconfig_path }} || echo "❌ El archivo no fue modificado correctamente"
+      register: check_kubeconfig
+      changed_when: false
 
-- name: Reemplazar endpoint del server en workers
-  hosts: workers
-  gather_facts: false
-  vars:
-    vip_ip: "10.17.5.10"
-  tasks:
-    - name: Reemplazar --server en k3s-agent.service por IP VIP
-      raw: >
-        sed -i 's|--server https://.*:6443|--server https://{{ vip_ip }}:6443|' /etc/systemd/system/k3s-agent.service
-
-    - name: Reiniciar K3s Agent correctamente
-      raw: |
-        systemctl daemon-reexec
-        systemctl daemon-reload
-        systemctl restart k3s-agent
-
-    - name: Esperar unos segundos para estabilizar
-      raw: sleep 5
+    - name: Mostrar resultado de verificacion
+      debug:
+        var: check_kubeconfig.stdout_lines
