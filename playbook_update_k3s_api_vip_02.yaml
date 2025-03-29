@@ -1,42 +1,44 @@
-- name: Configurar k3s con IP VIP en masters y reiniciar
+---
+- name: Reemplazar endpoint API por IP VIP y reiniciar K3s
   hosts: masters
   gather_facts: false
-  become: true
-
   vars:
     vip_ip: "10.17.5.10"
-
   tasks:
-    - name: Verificar si k3s.service existe
-      raw: "test -f /etc/systemd/system/k3s.service"
-      register: k3s_service_check
-      ignore_errors: true
+    - name: Agregar --tls-san VIP al ExecStart en k3s.service si no existe
+      raw: >
+        grep -q -- '--tls-san {{ vip_ip }}' /etc/systemd/system/k3s.service || \
+        sed -i '/ExecStart=/ s|\\(--tls-san [^ ]*\\)|\\1 --tls-san {{ vip_ip }}|' /etc/systemd/system/k3s.service
 
-    - name: Hacer backup de k3s.service si existe
-      raw: "cp /etc/systemd/system/k3s.service /etc/systemd/system/k3s.service.bak"
-      when: k3s_service_check.rc == 0
+    - name: Reemplazar IP en k3s.yaml por la VIP
+      raw: >
+        sed -i 's|server: https://.*:6443|server: https://{{ vip_ip }}:6443|' /etc/rancher/k3s/k3s.yaml
 
-    - name: Asegurar que --tls-san VIP esté en ExecStart
-      raw: "sed -i '/ExecStart=/ s|\\(--tls-san [^ ]*\\)|\1 --tls-san {{ vip_ip }}|' /etc/systemd/system/k3s.service"
+    - name: Reiniciar K3s correctamente
+      raw: |
+        systemctl daemon-reexec
+        systemctl daemon-reload
+        systemctl restart k3s
 
-    - name: Asegurar que --write-kubeconfig esté presente
-      raw: "grep -q -- '--write-kubeconfig' /etc/systemd/system/k3s.service || sed -i '/ExecStart=/ s|\\(--tls-san [^ ]*\\)|\1 --write-kubeconfig /etc/rancher/k3s/k3s.yaml --write-kubeconfig-mode 644|' /etc/systemd/system/k3s.service"
+    - name: Verificar API con curl (401 esperado)
+      raw: |
+        curl -k https://{{ vip_ip }}:6443 || true
 
-    - name: Ejecutar systemctl daemon-reexec
-      raw: "systemctl daemon-reexec"
+- name: Reemplazar endpoint del server en workers
+  hosts: workers
+  gather_facts: false
+  vars:
+    vip_ip: "10.17.5.10"
+  tasks:
+    - name: Reemplazar --server en k3s-agent.service por IP VIP
+      raw: >
+        sed -i 's|--server https://.*:6443|--server https://{{ vip_ip }}:6443|' /etc/systemd/system/k3s-agent.service
 
-    - name: Ejecutar systemctl daemon-reload
-      raw: "systemctl daemon-reload"
+    - name: Reiniciar K3s Agent correctamente
+      raw: |
+        systemctl daemon-reexec
+        systemctl daemon-reload
+        systemctl restart k3s-agent
 
-    - name: Reiniciar k3s
-      raw: "systemctl restart k3s"
-
-    - name: Reemplazar IP local por IP VIP en k3s.yaml
-      raw: "sed -i 's|server: https://127.0.0.1:6443|server: https://{{ vip_ip }}:6443|' /etc/rancher/k3s/k3s.yaml"
-      ignore_errors: true
-
-    - name: Esperar 10 segundos para estabilidad
-      raw: "sleep 10"
-
-    - name: Validar que el API responde por la VIP con curl
-      raw: "curl -sk https://{{ vip_ip }}:6443 || true"
+    - name: Esperar unos segundos para estabilizar
+      raw: sleep 5
