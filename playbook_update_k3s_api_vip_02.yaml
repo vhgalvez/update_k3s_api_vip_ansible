@@ -1,30 +1,32 @@
 ---
 - name: Actualizar K3s para usar la IP VIP en todos los nodos
-  hosts: k8s_cluster
+  hosts: all
   become: true
   gather_facts: false
 
   vars:
-    vip_ip: "10.17.5.10"
+    vip_ip: "{{ api_vip | default('10.17.5.10') }}"
     kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
     k3s_service_path: "/etc/systemd/system/k3s.service"
 
   tasks:
-    - name: Cambiar endpoint en kubeconfig a la VIP (todos los nodos)
+
+    - name: Cambiar endpoint en kubeconfig a la VIP (todos los nodos si existe)
       raw: |
-        if grep -q "server: https://127.0.0.1:6443" "{{ kubeconfig_path }}"; then
-          sed -i 's|server: https://127.0.0.1:6443|server: https://{{ vip_ip }}:6443|' "{{ kubeconfig_path }}"
+        if [ -f "{{ kubeconfig_path }}" ]; then
+          sed -i 's|server: https://127.0.0.1:6443|server: https://{{ vip_ip }}:6443|' {{ kubeconfig_path }}
         fi
-      when: ansible_host is defined
 
     - name: Añadir --tls-san {{ vip_ip }} en masters si no existe
       raw: |
-        grep -q -- "--tls-san {{ vip_ip }}" "{{ k3s_service_path }}" || \
-        sed -i "/ExecStart=/ s|\\(--tls-san [^ ]\\+\\)|\\1 --tls-san {{ vip_ip }}|" "{{ k3s_service_path }}"
+        grep -q -- "--tls-san {{ vip_ip }}" {{ k3s_service_path }} || \
+        sed -i "/ExecStart=/ s|\\(--tls-san [^ ]\\+\\)|\\1 --tls-san {{ vip_ip }}|" {{ k3s_service_path }}
       when: inventory_hostname in groups['masters']
 
     - name: Eliminar certificados TLS en masters para regeneración con VIP
-      raw: "rm -rf /var/lib/rancher/k3s/server/tls"
+      raw: |
+        rm -rf /var/lib/rancher/k3s/server/tls
+        rm -rf /var/lib/rancher/k3s/server/db/etcd-tmp
       when: inventory_hostname in groups['masters']
 
     - name: Recargar systemd y reiniciar K3s (solo masters)
@@ -34,20 +36,22 @@
         systemctl restart k3s
       when: inventory_hostname in groups['masters']
 
-    - name: Esperar a que el API esté disponible en la VIP (máximo 60s)
+    - name: Esperar a que API esté disponible por VIP
       raw: |
-        timeout=60
-        while ! curl -sk https://{{ vip_ip }}:6443/version &>/dev/null; do
-          echo "Esperando que el API esté disponible..."
-          sleep 2
-          timeout=$((timeout-2))
-          [ $timeout -le 0 ] && echo "⛔️ Tiempo de espera agotado" && exit 1
+        for i in $(seq 1 60); do
+          curl -k --max-time 1 https://{{ vip_ip }}:6443/version >/dev/null 2>&1 && exit 0
+          sleep 1
         done
-      when: inventory_hostname in groups['masters'][0]  # Solo lo hace una vez
+        echo "❌ La API en {{ vip_ip }}:6443 no respondió en 60s"
+      when: inventory_hostname in groups['masters'] | first == inventory_hostname
 
-    - name: Verificar que el kubeconfig usa la VIP
+    - name: Verificar que el kubeconfig usa la VIP (solo si existe)
       raw: |
-        grep 'server: https://{{ vip_ip }}:6443' "{{ kubeconfig_path }}" || echo "❌ El archivo no fue modificado correctamente"
+        if [ -f "{{ kubeconfig_path }}" ]; then
+          grep 'server: https://{{ vip_ip }}:6443' "{{ kubeconfig_path }}" || echo "❌ El archivo no fue modificado correctamente"
+        else
+          echo "⚠️ El archivo {{ kubeconfig_path }} no existe en este nodo"
+        fi
       register: check_kubeconfig
       changed_when: false
 
