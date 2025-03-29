@@ -1,5 +1,46 @@
 ---
-- name: Actualizar K3s para usar la IP VIP en todos los nodos
+- name: Fase 1 - Actualizar el primer master con la IP VIP
+  hosts: "{{ groups['masters'][0] }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    vip_ip: "{{ api_vip | default('10.17.5.10') }}"
+    kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
+    k3s_service_path: "/etc/systemd/system/k3s.service"
+    agent_service_path: "/etc/systemd/system/k3s-agent.service"
+
+  tasks:
+    - name: Añadir --tls-san VIP si no está presente
+      raw: |
+        grep -q -- "--tls-san {{ vip_ip }}" {{ k3s_service_path }} || \
+        sed -i "/ExecStart=/ s|\(--tls-san [^ ]\+\)|\1 --tls-san {{ vip_ip }}|" {{ k3s_service_path }}
+
+    - name: Eliminar --advertise-address si existe
+      raw: |
+        sed -i "/ExecStart=/ s| --advertise-address [^ ]*||" {{ k3s_service_path }}
+
+    - name: Eliminar certificados TLS para regeneración
+      raw: |
+        rm -rf /var/lib/rancher/k3s/server/tls
+        rm -rf /var/lib/rancher/k3s/server/db/etcd-tmp
+
+    - name: Reiniciar K3s y esperar
+      raw: |
+        systemctl daemon-reexec
+        systemctl daemon-reload
+        systemctl restart k3s
+
+    - name: Esperar a que API esté disponible por VIP
+      raw: |
+        for i in $(seq 1 60); do
+          curl -k --max-time 1 https://{{ vip_ip }}:6443/version >/dev/null 2>&1 && exit 0
+          sleep 1
+        done
+        echo "❌ La API en {{ vip_ip }}:6443 no respondió en 60s"
+
+---
+- name: Fase 2 - Aplicar VIP a los demás masters, agentes y almacenamiento
   hosts: all
   become: true
   gather_facts: false
@@ -11,77 +52,52 @@
     agent_service_path: "/etc/systemd/system/k3s-agent.service"
 
   tasks:
-    # Cambiar endpoint en kubeconfig si existe
-    - name: Cambiar endpoint en kubeconfig a la VIP (si existe)
+    - name: Cambiar IP del API server en agentes (workers y storage)
       raw: |
-        if [ -f "{{ kubeconfig_path }}" ]; then
-          sed -i 's|server: https://127.0.0.1:6443|server: https://{{ vip_ip }}:6443|' {{ kubeconfig_path }}
-        fi
-
-    # --- Solo masters ---
-    - name: Añadir --tls-san {{ vip_ip }} en masters si no existe
-      raw: |
-        grep -q -- "--tls-san {{ vip_ip }}" {{ k3s_service_path }} || \
-        sed -i "/ExecStart=/ s|\\(--tls-san [^ ]\\+\\)|\\1 --tls-san {{ vip_ip }}|" {{ k3s_service_path }}
-      when: inventory_hostname in groups['masters']
-
-    - name: Eliminar --advertise-address de k3s en masters (si estaba puesto)
-      raw: |
-        sed -i "/ExecStart=/ s| --advertise-address [^ ]*||" {{ k3s_service_path }}
-      when: inventory_hostname in groups['masters']
-
-    - name: Eliminar certificados TLS en masters para regeneración con VIP
-      raw: |
-        rm -rf /var/lib/rancher/k3s/server/tls
-        rm -rf /var/lib/rancher/k3s/server/db/etcd-tmp
-      when: inventory_hostname in groups['masters']
-
-    - name: Recargar systemd y reiniciar K3s en masters
-      raw: |
-        systemctl daemon-reexec
-        systemctl daemon-reload
-        systemctl restart k3s
-      when: inventory_hostname in groups['masters']
-
-    # Esperar a la API (solo en el primer master)
-    - name: Esperar a que la API esté disponible por VIP
-      raw: |
-        for i in $(seq 1 60); do
-          curl -k --max-time 1 https://{{ vip_ip }}:6443/version >/dev/null 2>&1 && exit 0
-          sleep 1
-        done
-        echo "❌ La API en {{ vip_ip }}:6443 no respondió en 60s"
-      when: inventory_hostname == (groups['masters'] | first)
-
-    # --- Agentes (workers + storage) ---
-    - name: Cambiar IP del API server en k3s-agent.service a la VIP
-      raw: |
-        sed -i "s|--server https://[^ ]\\+|--server https://{{ vip_ip }}:6443|" {{ agent_service_path }}
+        sed -i "s|--server https://[^ ]\+|--server https://{{ vip_ip }}:6443|" {{ agent_service_path }}
       when: inventory_hostname not in groups['masters']
 
-    - name: Recargar systemd y reiniciar k3s-agent
+    - name: Reiniciar k3s-agent
       raw: |
         systemctl daemon-reexec
         systemctl daemon-reload
         systemctl restart k3s-agent
       when: inventory_hostname not in groups['masters']
 
-    - name: Confirmar que el agente k3s está activo
+    - name: Verificar que k3s-agent está activo
       raw: |
         systemctl is-active k3s-agent || echo "❌ El agente k3s no está activo"
       when: inventory_hostname not in groups['masters']
 
-    # --- Verificación final ---
-    - name: Confirmar que kubeconfig usa la IP VIP (si existe)
+    - name: Aplicar VIP en los demás masters (excepto el primero)
+      raw: |
+        grep -q -- "--tls-san {{ vip_ip }}" {{ k3s_service_path }} || \
+        sed -i "/ExecStart=/ s|\(--tls-san [^ ]\+\)|\1 --tls-san {{ vip_ip }}|" {{ k3s_service_path }}
+      when: inventory_hostname in groups['masters'] and inventory_hostname != groups['masters'][0]
+
+    - name: Eliminar certificados TLS en los demás masters
+      raw: |
+        rm -rf /var/lib/rancher/k3s/server/tls
+        rm -rf /var/lib/rancher/k3s/server/db/etcd-tmp
+      when: inventory_hostname in groups['masters'] and inventory_hostname != groups['masters'][0]
+
+    - name: Reiniciar K3s en los demás masters
+      raw: |
+        systemctl daemon-reexec
+        systemctl daemon-reload
+        systemctl restart k3s
+      when: inventory_hostname in groups['masters'] and inventory_hostname != groups['masters'][0]
+
+    - name: Verificar si kubeconfig usa la VIP (si existe)
       raw: |
         if [ -f "{{ kubeconfig_path }}" ]; then
-          grep 'server: https://{{ vip_ip }}:6443' "{{ kubeconfig_path }}" || echo "❌ El archivo no fue modificado correctamente"
+          grep 'server: https://{{ vip_ip }}:6443' "{{ kubeconfig_path }}" || echo "❌ kubeconfig sin VIP"
         else
-          echo "⚠️ El archivo {{ kubeconfig_path }} no existe en este nodo"
+          echo "⚠️ No existe kubeconfig (normal en agentes)"
         fi
-      register: check_kubeconfig
+      register: resultado_kubeconfig
       changed_when: false
 
-    - name: Mostrar resultado de verificación
+    - name: Mostrar resultado
       debug:
-        var: check_kubeconfig.stdout_lines
+        var: resultado_kubeconfig.stdout_lines
