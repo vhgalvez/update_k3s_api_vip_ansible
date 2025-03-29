@@ -57,6 +57,7 @@
       register: restart_k3s
       until: restart_k3s.rc == 0
       retries: 3
+      delay: 10
 
     - name: "⚡ Reiniciar k3s-agent (workers)"
       raw: |
@@ -66,6 +67,7 @@
       register: restart_agent
       until: restart_agent.rc == 0
       retries: 3
+      delay: 10
 
     # --- Verificación crítica ---
     - name: "✅ Validar certificados y API"
