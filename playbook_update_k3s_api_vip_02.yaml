@@ -3,44 +3,50 @@
   hosts: k8s_cluster
   become: true
   gather_facts: false
-
   vars:
     api_vip: "https://10.17.5.10:6443"
 
   tasks:
     - name: Hacer copia de seguridad de k3s.yaml si existe
       ansible.builtin.raw: |
-        if [ -f /etc/rancher/k3s/k3s.yaml ]; then
-          cp /etc/rancher/k3s/k3s.yaml /etc/rancher/k3s/k3s.yaml.bak
-        fi
+        if [ -f /etc/rancher/k3s/k3s.yaml ]; then cp /etc/rancher/k3s/k3s.yaml /etc/rancher/k3s/k3s.yaml.bak; fi
       ignore_errors: true
 
     - name: Verificar si existe el archivo k3s.yaml
       ansible.builtin.raw: |
-        if [ -f /etc/rancher/k3s/k3s.yaml ]; then
-          echo "El archivo k3s.yaml existe"
-        else
-          echo "El archivo k3s.yaml no existe"
-        fi
+        if [ -f /etc/rancher/k3s/k3s.yaml ]; then echo "EXISTE"; else echo "NOEXISTE"; fi
       register: k3s_yaml_status
 
     - name: Reemplazar IP del API server en k3s.yaml
       ansible.builtin.raw: |
-        sed -i 's|^server:.*|server: {{ api_vip }}|' /etc/rancher/k3s/k3s.yaml
-      when: "'El archivo k3s.yaml existe' in k3s_yaml_status.stdout"
+        sed -i 's|^\s*server:.*|    server: {{ api_vip }}|' /etc/rancher/k3s/k3s.yaml
+      when: k3s_yaml_status.stdout == "EXISTE"
 
-    - name: Regenerar todos los certificados en nodos master
+    - name: Actualizar k3s-agent.service en workers para apuntar al VIP
+      when: inventory_hostname in groups['workers']
+      block:
+        - name: Reemplazar IP en --server de k3s-agent.service
+          ansible.builtin.replace:
+            path: /etc/systemd/system/k3s-agent.service
+            regexp: 'https://10\.17\.4\.\d+:6443'
+            replace: '{{ api_vip }}'
+
+        - name: Recargar systemd y reiniciar k3s-agent
+          ansible.builtin.systemd:
+            name: k3s-agent
+            state: restarted
+            daemon_reload: true
+
+    - name: Regenerar todos los certificados en masters
       ansible.builtin.raw: |
-        k3s certificate rotate
+        k3s certificate rotate --force
       when: inventory_hostname in groups['masters']
 
     - name: Reiniciar k3s o k3s-agent según el nodo
-      ansible.builtin.raw: |
-        if systemctl list-units --type=service | grep -q k3s.service; then
-          systemctl restart k3s
-        elif systemctl list-units --type=service | grep -q k3s-agent.service; then
-          systemctl restart k3s-agent
-        fi
+      ansible.builtin.systemd:
+        name: "{{ 'k3s-agent' if inventory_hostname in groups['workers'] else 'k3s' }}"
+        state: restarted
+        daemon_reload: true
 
     - name: Validar conectividad con el API Server por la VIP (solo masters)
       ansible.builtin.raw: |
@@ -48,5 +54,5 @@
       register: resultado
       until: resultado.rc == 0
       retries: 5
-      delay: 10
+      delay: 5
       when: inventory_hostname in groups['masters']
