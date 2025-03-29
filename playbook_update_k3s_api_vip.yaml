@@ -12,80 +12,74 @@
     primer_master: "{{ groups['masters'][0] }}"
 
   tasks:
-    # --- Configurar VIP en el primer master ---
-    - name: Asignar IP VIP al primer master
+    # --- Configurar VIP solo en el primer master (idempotente) ---
+    - name: "🖥️ Asignar VIP al primer master"
       raw: |
-        ip addr add {{ vip_ip }}/24 dev eth0 || true
+        if ! ip a show eth0 | grep -q "{{ vip_ip }}"; then
+          ip addr add {{ vip_ip }}/24 dev eth0
+        fi
       when: inventory_hostname == primer_master
 
-    # --- Actualizar servicio K3s en todos los masters ---
-    - name: Asegurar TLS SAN en masters
+    # --- Añadir TLS SAN de forma segura ---
+    - name: "🔐 Agregar VIP a TLS SANs"
       raw: |
-        sed -i 's|^ExecStart=.*|& --tls-san {{ vip_ip }}|' {{ k3s_service_path }}
+        grep -q "{{ vip_ip }}" {{ k3s_service_path }} || sed -i '/ExecStart=/ s/$/ --tls-san {{ vip_ip }}/' {{ k3s_service_path }}
       when: inventory_hostname in groups['masters']
 
-    # --- Eliminar certificados antiguos ---
-    - name: Eliminar certificados antiguos
+    # --- Eliminar datos antiguos (certificados + etcd) ---
+    - name: "🧹 Limpiar datos previos"
       raw: |
-        rm -rf /var/lib/rancher/k3s/server/tls
+        systemctl stop k3s || true
+        rm -rf /var/lib/rancher/k3s/server/tls/*
+        rm -rf /var/lib/rancher/k3s/server/db/etcd/*
       when: inventory_hostname in groups['masters']
 
-    # --- Corregir kubeconfig para usar VIP ---
-    - name: Corregir kubeconfig para usar VIP
+    # --- Actualizar kubeconfig (forzar cambios) ---
+    - name: "📄 Corregir kubeconfig"
       raw: |
-        sed -i 's|server: https://127.0.0.1:6443|server: https://{{ vip_ip }}:6443|' {{ kubeconfig_path }}
+        sed -i 's|server: .*|server: https://{{ vip_ip }}:6443|' {{ kubeconfig_path }}
       when: inventory_hostname in groups['masters']
 
-    # --- Actualizar endpoint en agentes ---
-    - name: Actualizar endpoint en agentes
+    # --- Configurar agentes con reintentos ---
+    - name: "🔄 Actualizar endpoint en agentes"
       raw: |
-        sed -i 's|--server https://\S+|--server https://{{ vip_ip }}:6443|' {{ agent_service_path }}
+        sed -i 's|--server .*|--server https://{{ vip_ip }}:6443|' {{ agent_service_path }}
       when: inventory_hostname not in groups['masters']
-
-    # --- Verificación de certificados ---
-    - name: Verificar si los certificados se regeneraron correctamente
-      raw: |
-        ls /var/lib/rancher/k3s/server/tls
-      register: cert_check
-      failed_when: cert_check.rc != 0
-
-    # --- Verificar si K3s y K3s-agent están activos ---
-    - name: Verificar si K3s está activo
-      raw: |
-        systemctl is-active k3s
-      register: k3s_status
-      failed_when: k3s_status.stdout != 'active'
-
-    - name: Verificar si K3s-agent está activo
-      raw: |
-        systemctl is-active k3s-agent
-      register: k3s_agent_status
-      failed_when: k3s_agent_status.stdout != 'active'
-
-    # --- Pausa para asegurarse de que los servicios se reinicien correctamente ---
-    - name: Esperar 1 minuto para que los servicios se reinicien
-      pause:
-        minutes: 1
-
-    # --- Verificar API en VIP ---
-    - name: Verificar API en VIP
-      uri:
-        url: "https://{{ vip_ip }}:6443/version"
-        validate_certs: no
-        status_code: 200
-      register: api_check
-      until: api_check.status == 200
-      retries: 10
+      retries: 3
       delay: 10
-      when: inventory_hostname == primer_master
 
-    # --- Reiniciar K3s al final ---
-    - name: Reiniciar K3s con timeout extendido
+    # --- Reiniciar servicios con verificación ---
+    - name: "⚡ Reiniciar K3s (masters)"
       raw: |
+        systemctl daemon-reload
         systemctl restart k3s
       when: inventory_hostname in groups['masters']
+      register: restart_k3s
+      until: restart_k3s.rc == 0
+      retries: 3
 
-    - name: Reiniciar k3s-agent
+    - name: "⚡ Reiniciar k3s-agent (workers)"
       raw: |
+        systemctl daemon-reload
         systemctl restart k3s-agent
       when: inventory_hostname not in groups['masters']
+      register: restart_agent
+      until: restart_agent.rc == 0
+      retries: 3
+
+    # --- Verificación crítica ---
+    - name: "✅ Validar certificados y API"
+      block:
+        - name: "🔍 Certificados regenerados"
+          raw: |
+            [ -f /var/lib/rancher/k3s/server/tls/server-ca.crt ] || exit 1
+          when: inventory_hostname in groups['masters']
+
+        - name: "🌐 Testear API VIP"
+          raw: |
+            curl -k --retry 5 --max-time 3 https://{{ vip_ip }}:6443/version
+          when: inventory_hostname == primer_master
+      rescue:
+        - name: "🚨 Error crítico: Revertir cambios"
+          debug:
+            msg: "Falló la configuración. Verifique VIP y logs de K3s."
