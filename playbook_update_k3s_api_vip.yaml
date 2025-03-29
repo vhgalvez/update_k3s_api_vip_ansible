@@ -14,78 +14,62 @@
   tasks:
     # --- Configurar VIP en el primer master ---
     - name: Asignar IP VIP al primer master
-      ansible.builtin.shell: |
+      raw: |
         ip addr add {{ vip_ip }}/24 dev eth0 || true
-      args:
-        warn: false
       when: inventory_hostname == primer_master
 
     # --- Actualizar servicio K3s en todos los masters ---
     - name: Asegurar TLS SAN en masters
-      ansible.builtin.lineinfile:
-        path: "{{ k3s_service_path }}"
-        regexp: '^(ExecStart=.*?--tls-san )'
-        line: '\1{{ vip_ip }}'
-        backrefs: yes
+      raw: |
+        sed -i 's|^ExecStart=.*|& --tls-san {{ vip_ip }}|' {{ k3s_service_path }}
       when: inventory_hostname in groups['masters']
 
-    # --- Regenerar certificados ---
+    # --- Eliminar certificados antiguos ---
     - name: Eliminar certificados antiguos
-      ansible.builtin.file:
-        path: "/var/lib/rancher/k3s/server/tls"
-        state: absent
+      raw: |
+        rm -rf /var/lib/rancher/k3s/server/tls
       when: inventory_hostname in groups['masters']
 
-    # --- Actualizar kubeconfig en masters ---
+    # --- Corregir kubeconfig para usar VIP ---
     - name: Corregir kubeconfig para usar VIP
-      ansible.builtin.replace:
-        path: "{{ kubeconfig_path }}"
-        regexp: 'server: https://127.0.0.1:6443'
-        replace: 'server: https://{{ vip_ip }}:6443'
+      raw: |
+        sed -i 's|server: https://127.0.0.1:6443|server: https://{{ vip_ip }}:6443|' {{ kubeconfig_path }}
       when: inventory_hostname in groups['masters']
 
-    # --- Configurar agentes para usar VIP ---
+    # --- Actualizar endpoint en agentes ---
     - name: Actualizar endpoint en agentes
-      ansible.builtin.replace:
-        path: "{{ agent_service_path }}"
-        regexp: '--server https://\S+'
-        replace: '--server https://{{ vip_ip }}:6443'
+      raw: |
+        sed -i 's|--server https://\S+|--server https://{{ vip_ip }}:6443|' {{ agent_service_path }}
       when: inventory_hostname not in groups['masters']
 
-    # --- Verificación de certificados --- 
+    # --- Verificación de certificados ---
     - name: Verificar si los certificados se regeneraron correctamente
-      ansible.builtin.stat:
-        path: "/var/lib/rancher/k3s/server/tls"
+      raw: |
+        [ -d /var/lib/rancher/k3s/server/tls ]
       register: cert_check
+      failed_when: cert_check.rc != 0
 
-    - name: Confirmar regeneración de certificados
-      ansible.builtin.fail:
-        msg: "Los certificados no se han regenerado correctamente."
-      when: cert_check.stat.exists == false
-
-    # --- Verificar si el servicio k3s-agent está activo ---
+    # --- Verificar si K3s y K3s-agent están activos ---
     - name: Verificar si K3s está activo
-      ansible.builtin.systemd:
-        name: k3s
-        state: started
+      raw: |
+        systemctl is-active k3s
       register: k3s_status
-      failed_when: k3s_status.state != 'started'
+      failed_when: k3s_status.stdout != 'active'
 
-    - name: Verificar si el servicio k3s-agent está activo
-      ansible.builtin.systemd:
-        name: k3s-agent
-        state: started
+    - name: Verificar si K3s-agent está activo
+      raw: |
+        systemctl is-active k3s-agent
       register: k3s_agent_status
-      failed_when: k3s_agent_status.state != 'started'
+      failed_when: k3s_agent_status.stdout != 'active'
 
     # --- Pausa para asegurarse de que los servicios se reinicien correctamente ---
     - name: Esperar 1 minuto para que los servicios se reinicien
-      ansible.builtin.pause:
+      pause:
         minutes: 1
 
     # --- Verificar API en VIP ---
     - name: Verificar API en VIP
-      ansible.builtin.uri:
+      uri:
         url: "https://{{ vip_ip }}:6443/version"
         validate_certs: no
         status_code: 200
@@ -97,15 +81,11 @@
 
     # --- Reiniciar K3s al final ---
     - name: Reiniciar K3s con timeout extendido
-      ansible.builtin.systemd:
-        name: k3s
-        state: restarted
-        daemon_reload: yes
-        timeout: 300  # 5 minutos
+      raw: |
+        systemctl restart k3s
       when: inventory_hostname in groups['masters']
 
     - name: Reiniciar k3s-agent
-      ansible.builtin.systemd:
-        name: k3s-agent
-        state: restarted
+      raw: |
+        systemctl restart k3s-agent
       when: inventory_hostname not in groups['masters']
