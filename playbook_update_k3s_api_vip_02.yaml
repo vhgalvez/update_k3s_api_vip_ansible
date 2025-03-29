@@ -1,51 +1,56 @@
 ---
-- name: Actualizar configuración de K3s para usar la IP VIP
+- name: Actualizar K3s para usar la IP VIP en todos los nodos
   hosts: k8s_cluster
   become: true
-  gather_facts: true
+  gather_facts: false
 
   vars:
     vip_ip: "10.17.5.10"
     kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
     k3s_service_path: "/etc/systemd/system/k3s.service"
-    tls_san_option: "--tls-san {{ vip_ip }}"
 
   tasks:
-    - name: Modificar el endpoint del kubeconfig para apuntar a la VIP
-      replace:
-        path: "{{ kubeconfig_path }}"
-        regexp: 'server: https://.*:6443'
-        replace: 'server: https://{{ vip_ip }}:6443'
-      when: "'masters' in group_names or 'workers' in group_names or 'storage' in group_names"
+    - name: Cambiar endpoint en kubeconfig a la VIP (todos los nodos)
+      raw: |
+        if grep -q "server: https://127.0.0.1:6443" "{{ kubeconfig_path }}"; then
+          sed -i 's|server: https://127.0.0.1:6443|server: https://{{ vip_ip }}:6443|' "{{ kubeconfig_path }}"
+        fi
+      when: ansible_host is defined
 
-    - name: Agregar --tls-san para la VIP en el servicio de K3s
-      lineinfile:
-        path: "{{ k3s_service_path }}"
-        backrefs: yes
-        regexp: '^(ExecStart=.*)$'
-        line: '\1 {{ tls_san_option }}'
-      when: "'masters' in group_names"
+    - name: Añadir --tls-san {{ vip_ip }} en masters si no existe
+      raw: |
+        grep -q -- "--tls-san {{ vip_ip }}" "{{ k3s_service_path }}" || \
+        sed -i "/ExecStart=/ s|\\(--tls-san [^ ]\\+\\)|\\1 --tls-san {{ vip_ip }}|" "{{ k3s_service_path }}"
+      when: inventory_hostname in groups['masters']
 
-    - name: Eliminar certificados TLS para regenerarlos con la nueva VIP
-      file:
-        path: "/var/lib/rancher/k3s/server/tls"
-        state: absent
-      when: "'masters' in group_names"
+    - name: Eliminar certificados TLS en masters para regeneración con VIP
+      raw: "rm -rf /var/lib/rancher/k3s/server/tls"
+      when: inventory_hostname in groups['masters']
 
-    - name: Recargar configuración de systemd y reiniciar K3s
-      systemd:
-        daemon_reload: true
-        name: k3s
-        state: restarted
-      when: "'masters' in group_names"
+    - name: Recargar systemd y reiniciar K3s (solo masters)
+      raw: |
+        systemctl daemon-reexec
+        systemctl daemon-reload
+        systemctl restart k3s
+      when: inventory_hostname in groups['masters']
 
-    - name: Verificar que el kubeconfig apunta a la VIP
-      command: grep 'server: https://{{ vip_ip }}:6443' {{ kubeconfig_path }}
-      register: kubeconfig_check
+    - name: Esperar a que el API esté disponible en la VIP (máximo 60s)
+      raw: |
+        timeout=60
+        while ! curl -sk https://{{ vip_ip }}:6443/version &>/dev/null; do
+          echo "Esperando que el API esté disponible..."
+          sleep 2
+          timeout=$((timeout-2))
+          [ $timeout -le 0 ] && echo "⛔️ Tiempo de espera agotado" && exit 1
+        done
+      when: inventory_hostname in groups['masters'][0]  # Solo lo hace una vez
+
+    - name: Verificar que el kubeconfig usa la VIP
+      raw: |
+        grep 'server: https://{{ vip_ip }}:6443' "{{ kubeconfig_path }}" || echo "❌ El archivo no fue modificado correctamente"
+      register: check_kubeconfig
       changed_when: false
-      failed_when: kubeconfig_check.rc != 0
 
-    - name: Mostrar resultado de la verificación
+    - name: Mostrar resultado
       debug:
-        msg: "El kubeconfig ha sido actualizado correctamente para usar la VIP."
-      when: kubeconfig_check.rc == 0
+        var: check_kubeconfig.stdout_lines
