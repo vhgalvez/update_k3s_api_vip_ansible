@@ -75,4 +75,4 @@ Si deseas contribuir al proyecto, por favor haz un fork del repositorio y envía
 
 ## Licencia
 
-Este proyecto está bajo la licencia MIT. Consulta el archivo [LICENSE](LICENSE)LICENSE para más detalles.
+Este proyecto está bajo la licencia MIT. Consulta el archivo [LICENSE](LICENSE) para más detalles.
