@@ -1,3 +1,4 @@
+---
 - name: Actualizar K3s para usar la IP VIP en todos los nodos
   hosts: all
   become: true
@@ -23,11 +24,10 @@
         sed -i "/ExecStart=/ s|\\(--tls-san [^ ]\\+\\)|\\1 --tls-san {{ vip_ip }}|" {{ k3s_service_path }}
       when: inventory_hostname in groups['masters']
 
-    # Añadir --node-external-ip a la configuración de k3s en los masters
-    - name: Añadir --node-external-ip a la configuración de k3s en los masters
+    # Eliminar --advertise-address de la configuración de k3s en los masters
+    - name: Eliminar --advertise-address de la configuración de k3s en los masters
       raw: |
-        grep -q -- "--node-external-ip {{ vip_ip }}" {{ k3s_service_path }} || \
-        sed -i "/ExecStart=/ s|\\(ExecStart=[^ ]\\+\\)|\\1 --node-external-ip {{ vip_ip }}|" {{ k3s_service_path }}
+        sed -i "/ExecStart=/ s| --advertise-address [^ ]* ||" {{ k3s_service_path }}
       when: inventory_hostname in groups['masters']
 
     # Eliminar certificados TLS en masters para regeneración con VIP
