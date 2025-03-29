@@ -1,39 +1,63 @@
 ---
 - name: Reemplazar endpoint API por IP VIP y reiniciar K3s
-  hosts: k8s_cluster
+  hosts: all
   gather_facts: false
-  become: true
-
+  vars:
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    vip_address: "10.17.5.10"
   tasks:
 
     - name: Verificar si existe el archivo k3s.yaml
-      ansible.builtin.command: test -f /etc/rancher/k3s/k3s.yaml
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
       register: k3s_yaml_status
-      ignore_errors: true
 
     - name: Copia de seguridad de k3s.yaml si existe
-      ansible.builtin.command: cp /etc/rancher/k3s/k3s.yaml /etc/rancher/k3s/k3s.yaml.bak
-      when: k3s_yaml_status.rc == 0
+      ansible.builtin.copy:
+        src: "{{ kubeconfig_path }}"
+        dest: "{{ kubeconfig_path }}.bak"
+        remote_src: yes
+      when: k3s_yaml_status.stat.exists
 
-    - name: Reemplazar IP del API server en k3s.yaml
-      ansible.builtin.command: >
-        sed -i 's|server: .*|server: https://10.17.5.10:6443|' /etc/rancher/k3s/k3s.yaml
-      when: k3s_yaml_status.rc == 0
+    - name: Reemplazar IP del API server en k3s.yaml por VIP
+      ansible.builtin.replace:
+        path: "{{ kubeconfig_path }}"
+        regexp: 'server: https://[0-9.]+:6443'
+        replace: "server: https://{{ vip_address }}:6443"
+      when: k3s_yaml_status.stat.exists
 
-    - name: Regenerar certificados en masters
-      ansible.builtin.command: /opt/bin/k3s certificate rotate --force
-      when: inventory_hostname in groups['masters']
+    - name: Determinar si el nodo es master (tiene k3s.service)
+      ansible.builtin.stat:
+        path: /etc/systemd/system/k3s.service
+      register: is_master
 
-    - name: Reiniciar servicio k3s o k3s-agent
-      ansible.builtin.shell: |
-        if systemctl list-units --full -all | grep -q 'k3s-agent.service'; then
-          systemctl restart k3s-agent
-        else
-          systemctl restart k3s
-        fi
-      args:
-        executable: /bin/sh
+    - name: Determinar si el nodo es worker (tiene k3s-agent.service)
+      ansible.builtin.stat:
+        path: /etc/systemd/system/k3s-agent.service
+      register: is_worker
 
-    - name: Validar conexión al API Server por VIP (solo masters)
-      ansible.builtin.command: curl -sk https://10.17.5.10:6443/version
-      when: inventory_hostname in groups['masters']
+    - name: Reiniciar k3s en masters
+      ansible.builtin.systemd:
+        name: k3s
+        state: restarted
+        enabled: yes
+      when: is_master.stat.exists
+
+    - name: Reiniciar k3s-agent en workers
+      ansible.builtin.systemd:
+        name: k3s-agent
+        state: restarted
+        enabled: yes
+      when: is_worker.stat.exists
+
+    - name: Esperar 10 segundos para que los servicios levanten
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Verificar acceso al API Server por la VIP (solo en masters)
+      ansible.builtin.uri:
+        url: "https://{{ vip_address }}:6443/healthz"
+        method: GET
+        validate_certs: no
+        status_code: 200
+      when: is_master.stat.exists
