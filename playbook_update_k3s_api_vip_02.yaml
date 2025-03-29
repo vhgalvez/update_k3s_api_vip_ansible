@@ -1,55 +1,45 @@
 ---
-- name: Reemplazar endpoint API por IP VIP y regenerar certificados en masters
-  hosts: all
+- name: Reemplazar endpoint API por IP VIP y reiniciar K3s
+  hosts: k8s_cluster
+  gather_facts: false
   become: true
-  vars:
-    api_vip: "https://10.17.5.10:6443"
+
   tasks:
 
-    - name: Hacer copia de seguridad de k3s.yaml si existe
-      ansible.builtin.shell: |
-        if [ -f /etc/rancher/k3s/k3s.yaml ]; then
-          cp /etc/rancher/k3s/k3s.yaml /etc/rancher/k3s/k3s.yaml.bak_$(date +%s)
-        fi
-      ignore_errors: true
-
     - name: Verificar si existe el archivo k3s.yaml
-      ansible.builtin.shell: |
-        if [ -f /etc/rancher/k3s/k3s.yaml ]; then echo "exists"; else echo "absent"; fi
-      register: k3s_yaml_status
-
-    - name: Reemplazar IP del API server en k3s.yaml si existe
       ansible.builtin.raw: |
-        sed -i 's|server:.*|server: {{ api_vip }}|' /etc/rancher/k3s/k3s.yaml
-      when: k3s_yaml_status.stdout == "exists"
-      ignore_errors: true
+        if [ -f /etc/rancher/k3s/k3s.yaml ]; then
+          echo "exists"
+        else
+          echo "missing"
+        fi
+      register: k3s_yaml_status
+      changed_when: false
 
-    - name: Añadir tls-san con IP VIP en k3s.service (solo masters)
-      when: inventory_hostname in groups['masters']
-      ansible.builtin.lineinfile:
-        path: /etc/systemd/system/k3s.service
-        regexp: '^ExecStart='
-        line: "ExecStart=/opt/bin/k3s server --cluster-init --tls-san {{ ansible_host }} --tls-san 10.17.5.10 --write-kubeconfig /etc/rancher/k3s/k3s.yaml --write-kubeconfig-mode 644"
-        backrefs: yes
+    - name: Copia de seguridad de k3s.yaml si existe
+      ansible.builtin.raw: |
+        cp /etc/rancher/k3s/k3s.yaml /etc/rancher/k3s/k3s.yaml.bak
+      when: "'exists' in k3s_yaml_status.stdout"
+
+    - name: Reemplazar IP del API server en k3s.yaml
+      ansible.builtin.raw: |
+        sed -i 's|server: .*|server: https://10.17.5.10:6443|' /etc/rancher/k3s/k3s.yaml
+      when: "'exists' in k3s_yaml_status.stdout"
 
     - name: Regenerar todos los certificados en nodos master
+      ansible.builtin.raw: |
+        /opt/bin/k3s certificate rotate --force
       when: inventory_hostname in groups['masters']
-      ansible.builtin.shell: "k3s certificate rotate --force"
 
-    - name: Recargar y reiniciar k3s o k3s-agent según el nodo
-      ansible.builtin.shell: |
-        systemctl daemon-reexec
-        systemctl daemon-reload
-        if systemctl list-units --type=service --all | grep -q k3s-agent.service; then
+    - name: Reiniciar servicio k3s o k3s-agent
+      ansible.builtin.raw: |
+        if systemctl list-units --full -all | grep -q 'k3s-agent.service'; then
           systemctl restart k3s-agent
         else
           systemctl restart k3s
         fi
 
-    - name: Validar conectividad con el API Server por la VIP (solo masters)
+    - name: Validar conexión al API Server por la IP VIP (solo masters)
+      ansible.builtin.raw: |
+        curl -sk https://10.17.5.10:6443/version || exit 1
       when: inventory_hostname in groups['masters']
-      ansible.builtin.uri:
-        url: "{{ api_vip }}"
-        method: GET
-        status_code: 401
-        validate_certs: no
