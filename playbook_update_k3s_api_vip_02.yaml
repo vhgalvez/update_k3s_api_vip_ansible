@@ -5,47 +5,45 @@
   gather_facts: false
 
   vars:
-    vip_ip: "{{ api_vip | default('10.17.5.10') }}"  # IP VIP para la API de Kubernetes
+    vip_ip: "{{ api_vip | default('10.17.5.10') }}"
     kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
     k3s_service_path: "/etc/systemd/system/k3s.service"
+    agent_service_path: "/etc/systemd/system/k3s-agent.service"
 
   tasks:
-    # Cambiar endpoint en kubeconfig a la VIP en todos los nodos si existe
-    - name: Cambiar endpoint en kubeconfig a la VIP (todos los nodos si existe)
+    # Cambiar endpoint en kubeconfig si existe
+    - name: Cambiar endpoint en kubeconfig a la VIP (si existe)
       raw: |
         if [ -f "{{ kubeconfig_path }}" ]; then
           sed -i 's|server: https://127.0.0.1:6443|server: https://{{ vip_ip }}:6443|' {{ kubeconfig_path }}
         fi
 
-    # Añadir --tls-san {{ vip_ip }} en masters si no existe
+    # --- Solo masters ---
     - name: Añadir --tls-san {{ vip_ip }} en masters si no existe
       raw: |
         grep -q -- "--tls-san {{ vip_ip }}" {{ k3s_service_path }} || \
         sed -i "/ExecStart=/ s|\\(--tls-san [^ ]\\+\\)|\\1 --tls-san {{ vip_ip }}|" {{ k3s_service_path }}
       when: inventory_hostname in groups['masters']
 
-    # Eliminar --advertise-address de la configuración de k3s en los masters
-    - name: Eliminar --advertise-address de la configuración de k3s en los masters
+    - name: Eliminar --advertise-address de k3s en masters (si estaba puesto)
       raw: |
-        sed -i "/ExecStart=/ s| --advertise-address [^ ]* ||" {{ k3s_service_path }}
+        sed -i "/ExecStart=/ s| --advertise-address [^ ]*||" {{ k3s_service_path }}
       when: inventory_hostname in groups['masters']
 
-    # Eliminar certificados TLS en masters para regeneración con VIP
     - name: Eliminar certificados TLS en masters para regeneración con VIP
       raw: |
         rm -rf /var/lib/rancher/k3s/server/tls
         rm -rf /var/lib/rancher/k3s/server/db/etcd-tmp
       when: inventory_hostname in groups['masters']
 
-    # Recargar systemd y reiniciar K3s (solo masters)
-    - name: Recargar systemd y reiniciar K3s (solo masters)
+    - name: Recargar systemd y reiniciar K3s en masters
       raw: |
         systemctl daemon-reexec
         systemctl daemon-reload
         systemctl restart k3s
       when: inventory_hostname in groups['masters']
 
-    # Esperar a que la API esté disponible por VIP (solo en el primer master)
+    # Esperar a la API (solo en el primer master)
     - name: Esperar a que la API esté disponible por VIP
       raw: |
         for i in $(seq 1 60); do
@@ -53,10 +51,28 @@
           sleep 1
         done
         echo "❌ La API en {{ vip_ip }}:6443 no respondió en 60s"
-      when: inventory_hostname in groups['masters'] | first == inventory_hostname
+      when: inventory_hostname == (groups['masters'] | first)
 
-    # Verificar que el kubeconfig usa la VIP (solo si existe)
-    - name: Verificar que el kubeconfig usa la VIP (solo si existe)
+    # --- Agentes (workers + storage) ---
+    - name: Cambiar IP del API server en k3s-agent.service a la VIP
+      raw: |
+        sed -i "s|--server https://[^ ]\\+|--server https://{{ vip_ip }}:6443|" {{ agent_service_path }}
+      when: inventory_hostname not in groups['masters']
+
+    - name: Recargar systemd y reiniciar k3s-agent
+      raw: |
+        systemctl daemon-reexec
+        systemctl daemon-reload
+        systemctl restart k3s-agent
+      when: inventory_hostname not in groups['masters']
+
+    - name: Confirmar que el agente k3s está activo
+      raw: |
+        systemctl is-active k3s-agent || echo "❌ El agente k3s no está activo"
+      when: inventory_hostname not in groups['masters']
+
+    # --- Verificación final ---
+    - name: Confirmar que kubeconfig usa la IP VIP (si existe)
       raw: |
         if [ -f "{{ kubeconfig_path }}" ]; then
           grep 'server: https://{{ vip_ip }}:6443' "{{ kubeconfig_path }}" || echo "❌ El archivo no fue modificado correctamente"
@@ -66,30 +82,6 @@
       register: check_kubeconfig
       changed_when: false
 
-    # Mostrar resultado de la verificación del kubeconfig
-    - name: Mostrar resultado de la verificación del kubeconfig
+    - name: Mostrar resultado de verificación
       debug:
         var: check_kubeconfig.stdout_lines
-
-    # Cambiar la IP VIP en los workers y storage
-    - name: Cambiar IP VIP en kubeconfig para los workers y storage
-      raw: |
-        if [ -f "{{ kubeconfig_path }}" ]; then
-          sed -i 's|server: https://127.0.0.1:6443|server: https://{{ vip_ip }}:6443|' {{ kubeconfig_path }}
-        fi
-      when: inventory_hostname not in groups['masters']
-
-    # Confirmar que todos los nodos, incluidos workers y almacenamiento, tienen la VIP en el kubeconfig
-    - name: Confirmar que todos los nodos tienen la VIP en kubeconfig
-      raw: |
-        if [ -f "{{ kubeconfig_path }}" ]; then
-          grep 'server: https://{{ vip_ip }}:6443' "{{ kubeconfig_path }}" || echo "❌ El archivo no fue modificado correctamente en {{ inventory_hostname }}"
-        else
-          echo "⚠️ El archivo {{ kubeconfig_path }} no existe en {{ inventory_hostname }}"
-        fi
-      register: check_kubeconfig_final
-      changed_when: false
-
-    - name: Mostrar resultado final de la verificación del kubeconfig
-      debug:
-        var: check_kubeconfig_final.stdout_lines
