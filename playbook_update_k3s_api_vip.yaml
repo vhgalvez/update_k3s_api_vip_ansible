@@ -1,46 +1,5 @@
 ---
-- name: Fase 1 - Actualizar el primer master con la IP VIP
-  hosts: "{{ groups['masters'][0] }}"
-  become: true
-  gather_facts: false
-
-  vars:
-    vip_ip: "{{ api_vip | default('10.17.5.10') }}"
-    kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
-    k3s_service_path: "/etc/systemd/system/k3s.service"
-    agent_service_path: "/etc/systemd/system/k3s-agent.service"
-
-  tasks:
-    - name: Añadir --tls-san VIP si no está presente
-      raw: |
-        grep -q -- "--tls-san {{ vip_ip }}" {{ k3s_service_path }} || \
-        sed -i "/ExecStart=/ s|\(--tls-san [^ ]\+\)|\1 --tls-san {{ vip_ip }}|" {{ k3s_service_path }}
-
-    - name: Eliminar --advertise-address si existe
-      raw: |
-        sed -i "/ExecStart=/ s| --advertise-address [^ ]*||" {{ k3s_service_path }}
-
-    - name: Eliminar certificados TLS para regeneración
-      raw: |
-        rm -rf /var/lib/rancher/k3s/server/tls
-        rm -rf /var/lib/rancher/k3s/server/db/etcd-tmp
-
-    - name: Reiniciar K3s y esperar
-      raw: |
-        systemctl daemon-reexec
-        systemctl daemon-reload
-        systemctl restart k3s
-
-    - name: Esperar a que API esté disponible por VIP
-      raw: |
-        for i in $(seq 1 60); do
-          curl -k --max-time 1 https://{{ vip_ip }}:6443/version >/dev/null 2>&1 && exit 0
-          sleep 1
-        done
-        echo "❌ La API en {{ vip_ip }}:6443 no respondió en 60s"
-
----
-- name: Fase 2 - Aplicar VIP a los demás masters, agentes y almacenamiento
+- name: Actualizar K3s para usar la IP VIP
   hosts: all
   become: true
   gather_facts: false
@@ -50,9 +9,46 @@
     kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
     k3s_service_path: "/etc/systemd/system/k3s.service"
     agent_service_path: "/etc/systemd/system/k3s-agent.service"
+    primer_master: "{{ groups['masters'][0] }}"
 
   tasks:
-    - name: Cambiar IP del API server en agentes (workers y storage)
+
+    # --- FASE 1: Primer master ---
+    - name: 🔧 Fase 1: Añadir --tls-san al primer master
+      raw: |
+        grep -q -- "--tls-san {{ vip_ip }}" {{ k3s_service_path }} || \
+        sed -i "/ExecStart=/ s|\(--tls-san [^ ]\+\)|\1 --tls-san {{ vip_ip }}|" {{ k3s_service_path }}
+      when: inventory_hostname == primer_master
+
+    - name: Eliminar --advertise-address del primer master (si existe)
+      raw: |
+        sed -i "/ExecStart=/ s| --advertise-address [^ ]*||" {{ k3s_service_path }}
+      when: inventory_hostname == primer_master
+
+    - name: Eliminar certificados TLS en el primer master
+      raw: |
+        rm -rf /var/lib/rancher/k3s/server/tls
+        rm -rf /var/lib/rancher/k3s/server/db/etcd-tmp
+      when: inventory_hostname == primer_master
+
+    - name: Reiniciar K3s en el primer master
+      raw: |
+        systemctl daemon-reexec
+        systemctl daemon-reload
+        systemctl restart k3s
+      when: inventory_hostname == primer_master
+
+    - name: Esperar a que la API esté disponible por VIP
+      raw: |
+        for i in $(seq 1 60); do
+          curl -k --max-time 1 https://{{ vip_ip }}:6443/version >/dev/null 2>&1 && exit 0
+          sleep 1
+        done
+        echo "❌ La API en {{ vip_ip }}:6443 no respondió en 60s"
+      when: inventory_hostname == primer_master
+
+    # --- FASE 2: Agentes (workers y storage) ---
+    - name: Modificar k3s-agent para usar la VIP
       raw: |
         sed -i "s|--server https://[^ ]\+|--server https://{{ vip_ip }}:6443|" {{ agent_service_path }}
       when: inventory_hostname not in groups['masters']
@@ -69,25 +65,27 @@
         systemctl is-active k3s-agent || echo "❌ El agente k3s no está activo"
       when: inventory_hostname not in groups['masters']
 
-    - name: Aplicar VIP en los demás masters (excepto el primero)
+    # --- FASE 2: Resto de masters ---
+    - name: Añadir --tls-san en los demás masters
       raw: |
         grep -q -- "--tls-san {{ vip_ip }}" {{ k3s_service_path }} || \
         sed -i "/ExecStart=/ s|\(--tls-san [^ ]\+\)|\1 --tls-san {{ vip_ip }}|" {{ k3s_service_path }}
-      when: inventory_hostname in groups['masters'] and inventory_hostname != groups['masters'][0]
+      when: inventory_hostname in groups['masters'] and inventory_hostname != primer_master
 
     - name: Eliminar certificados TLS en los demás masters
       raw: |
         rm -rf /var/lib/rancher/k3s/server/tls
         rm -rf /var/lib/rancher/k3s/server/db/etcd-tmp
-      when: inventory_hostname in groups['masters'] and inventory_hostname != groups['masters'][0]
+      when: inventory_hostname in groups['masters'] and inventory_hostname != primer_master
 
     - name: Reiniciar K3s en los demás masters
       raw: |
         systemctl daemon-reexec
         systemctl daemon-reload
         systemctl restart k3s
-      when: inventory_hostname in groups['masters'] and inventory_hostname != groups['masters'][0]
+      when: inventory_hostname in groups['masters'] and inventory_hostname != primer_master
 
+    # --- Verificación final ---
     - name: Verificar si kubeconfig usa la VIP (si existe)
       raw: |
         if [ -f "{{ kubeconfig_path }}" ]; then
@@ -98,6 +96,6 @@
       register: resultado_kubeconfig
       changed_when: false
 
-    - name: Mostrar resultado
+    - name: Mostrar resultado final
       debug:
         var: resultado_kubeconfig.stdout_lines
