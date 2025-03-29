@@ -27,7 +27,7 @@ Este repositorio contiene un playbook de Ansible para actualizar la IP del endpo
 Si prefieres no usar Ansible, puedes actualizar la IP del endpoint del API de K3s manualmente en cada nodo master. Para ello, sigue estos pasos:
 
 ```bash
-sudo sed -i 's|server: https://127.0.0.1:6443|server: https://10.17.5.10:6443|' /etc/rancher/k3s/k3s.yam
+sudo sed -i 's|server: https://127.0.0.1:6443|server: https://10.17.5.10:6443|' /etc/rancher/k3s/k3s.yaml
 ```
 
 
