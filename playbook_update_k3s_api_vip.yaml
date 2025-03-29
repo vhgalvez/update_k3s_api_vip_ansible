@@ -1,122 +1,111 @@
 ---
-- name: "Actualizar K3s para usar la IP VIP"
+- name: Configurar K3s con VIP 10.17.15.10
   hosts: all
   become: true
   gather_facts: false
 
   vars:
-    vip_ip: "{{ api_vip | default('10.17.15.10') }}"  # Usar la IP VIP proporcionada o la predeterminada
+    vip_ip: "10.17.15.10"
     k3s_service_path: "/etc/systemd/system/k3s.service"
     agent_service_path: "/etc/systemd/system/k3s-agent.service"
     kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
     primer_master: "{{ groups['masters'][0] }}"
 
   tasks:
-
-    # --- SOLO PRIMER MASTER ---
-    - name: "📌 Verificar si es el primer master"
-      debug:
-        msg: "Soy el primer master"
+    # --- Configurar VIP en el primer master ---
+    - name: Asignar IP VIP al primer master
+      ansible.builtin.shell: |
+        ip addr add {{ vip_ip }}/24 dev eth0 || true
+      args:
+        warn: false
       when: inventory_hostname == primer_master
 
-    - name: "🔄 Reconstruir archivo k3s.service en primer master"
-      copy:
-        dest: "{{ k3s_service_path }}"
-        content: |
-          [Unit]
-          Description=Lightweight Kubernetes
-          Wants=network-online.target
-          After=network-online.target
-
-          [Service]
-          Type=notify
-          ExecStartPre=-/sbin/modprobe br_netfilter
-          ExecStartPre=-/sbin/modprobe overlay
-          ExecStart=/opt/bin/k3s server --cluster-init --tls-san {{ inventory_hostname }} --tls-san {{ vip_ip }} --write-kubeconfig /etc/rancher/k3s/k3s.yaml --write-kubeconfig-mode 644
-          Restart=always
-          KillMode=process
-          Delegate=yes
-          LimitNOFILE=1048576
-          LimitNPROC=infinity
-          LimitCORE=infinity
-
-          [Install]
-          WantedBy=multi-user.target
-      when: inventory_hostname == primer_master
-
-    - name: "🧹 Borrar certificados TLS (regeneración)"
-      raw: |
-        rm -rf /var/lib/rancher/k3s/server/tls
-        rm -rf /var/lib/rancher/k3s/server/db/etcd-tmp
-      when: inventory_hostname == primer_master
-
-    - name: "♻️ Reiniciar K3s en primer master"
-      raw: |
-        systemctl daemon-reexec
-        systemctl daemon-reload
-        systemctl restart k3s
-      when: inventory_hostname == primer_master
-
-    - name: "⏳ Esperar que API responda por VIP (primer master)"
-      raw: |
-        for i in $(seq 1 60); do
-          curl -k --max-time 1 https://{{ vip_ip }}:6443/version >/dev/null 2>&1 && exit 0
-          sleep 1
-        done
-        echo "❌ La API en {{ vip_ip }}:6443 no respondió en 60s"
-      when: inventory_hostname == primer_master
-
-    # --- WORKERS Y STORAGE ---
-    - name: "📝 Reemplazar IP del API server en k3s-agent.service"
-      raw: |
-        sed -i "s|--server https://[^ ]\+|--server https://{{ vip_ip }}:6443|" {{ agent_service_path }}
-      when: inventory_hostname not in groups['masters']
-
-    - name: "♻️ Reiniciar k3s-agent"
-      raw: |
-        systemctl daemon-reexec
-        systemctl daemon-reload
-        systemctl restart k3s-agent
-      when: inventory_hostname not in groups['masters']
-
-    - name: "📡 Verificar que k3s-agent está activo"
-      raw: |
-        systemctl is-active k3s-agent || echo "❌ El agente k3s no está activo"
-      when: inventory_hostname not in groups['masters']
-
-    # --- RESTO DE MASTERS ---
-    - name: "➕ Añadir --tls-san en los demás masters"
-      raw: |
-        grep -q -- "--tls-san {{ vip_ip }}" {{ k3s_service_path }} || \
-        sed -i "/ExecStart=/ s|\(--tls-san [^ ]\+\)|\1 --tls-san {{ vip_ip }}|" {{ k3s_service_path }}
-      when: inventory_hostname in groups['masters'] and inventory_hostname != primer_master
-
-    - name: "🧹 Borrar TLS para regeneración (otros masters)"
-      raw: |
-        rm -rf /var/lib/rancher/k3s/server/tls
-        rm -rf /var/lib/rancher/k3s/server/db/etcd-tmp
-      when: inventory_hostname in groups['masters'] and inventory_hostname != primer_master
-
-    - name: "♻️ Reiniciar K3s en otros masters"
-      raw: |
-        systemctl daemon-reexec
-        systemctl daemon-reload
-        systemctl restart k3s
-      when: inventory_hostname in groups['masters'] and inventory_hostname != primer_master
-
-    # --- VERIFICACIÓN SOLO EN MASTERS ---
-    - name: "🔍 Verificar si kubeconfig usa la VIP (solo en masters)"
-      raw: |
-        if [ -f "{{ kubeconfig_path }}" ]; then
-          grep 'server: https://{{ vip_ip }}:6443' "{{ kubeconfig_path }}" || echo "❌ kubeconfig sin VIP"
-        else
-          echo "⚠️ No existe kubeconfig (normal en agentes)"
-        fi
+    # --- Actualizar servicio K3s en todos los masters ---
+    - name: Asegurar TLS SAN en masters
+      ansible.builtin.lineinfile:
+        path: "{{ k3s_service_path }}"
+        regexp: '^(ExecStart=.*?--tls-san )'
+        line: '\1{{ vip_ip }}'
+        backrefs: yes
       when: inventory_hostname in groups['masters']
-      register: resultado_kubeconfig
-      changed_when: false
 
-    - name: "📤 Mostrar resultado de verificación"
-      debug:
-        var: resultado_kubeconfig.stdout_lines
+    # --- Regenerar certificados ---
+    - name: Eliminar certificados antiguos
+      ansible.builtin.file:
+        path: "/var/lib/rancher/k3s/server/tls"
+        state: absent
       when: inventory_hostname in groups['masters']
+
+    # --- Actualizar kubeconfig en masters ---
+    - name: Corregir kubeconfig para usar VIP
+      ansible.builtin.replace:
+        path: "{{ kubeconfig_path }}"
+        regexp: 'server: https://127.0.0.1:6443'
+        replace: 'server: https://{{ vip_ip }}:6443'
+      when: inventory_hostname in groups['masters']
+
+    # --- Configurar agentes para usar VIP ---
+    - name: Actualizar endpoint en agentes
+      ansible.builtin.replace:
+        path: "{{ agent_service_path }}"
+        regexp: '--server https://\S+'
+        replace: '--server https://{{ vip_ip }}:6443'
+      when: inventory_hostname not in groups['masters']
+
+    # --- Verificación de certificados --- 
+    - name: Verificar si los certificados se regeneraron correctamente
+      ansible.builtin.stat:
+        path: "/var/lib/rancher/k3s/server/tls"
+      register: cert_check
+
+    - name: Confirmar regeneración de certificados
+      ansible.builtin.fail:
+        msg: "Los certificados no se han regenerado correctamente."
+      when: cert_check.stat.exists == false
+
+    # --- Verificar si el servicio k3s-agent está activo ---
+    - name: Verificar si K3s está activo
+      ansible.builtin.systemd:
+        name: k3s
+        state: started
+      register: k3s_status
+      failed_when: k3s_status.state != 'started'
+
+    - name: Verificar si el servicio k3s-agent está activo
+      ansible.builtin.systemd:
+        name: k3s-agent
+        state: started
+      register: k3s_agent_status
+      failed_when: k3s_agent_status.state != 'started'
+
+    # --- Pausa para asegurarse de que los servicios se reinicien correctamente ---
+    - name: Esperar 1 minuto para que los servicios se reinicien
+      ansible.builtin.pause:
+        minutes: 1
+
+    # --- Verificar API en VIP ---
+    - name: Verificar API en VIP
+      ansible.builtin.uri:
+        url: "https://{{ vip_ip }}:6443/version"
+        validate_certs: no
+        status_code: 200
+      register: api_check
+      until: api_check.status == 200
+      retries: 10
+      delay: 10
+      when: inventory_hostname == primer_master
+
+    # --- Reiniciar K3s al final ---
+    - name: Reiniciar K3s con timeout extendido
+      ansible.builtin.systemd:
+        name: k3s
+        state: restarted
+        daemon_reload: yes
+        timeout: 300  # 5 minutos
+      when: inventory_hostname in groups['masters']
+
+    - name: Reiniciar k3s-agent
+      ansible.builtin.systemd:
+        name: k3s-agent
+        state: restarted
+      when: inventory_hostname not in groups['masters']
