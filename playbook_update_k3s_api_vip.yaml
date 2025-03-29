@@ -45,7 +45,7 @@
     # --- Verificación de certificados ---
     - name: Verificar si los certificados se regeneraron correctamente
       raw: |
-        [ -d /var/lib/rancher/k3s/server/tls ]
+        ls /var/lib/rancher/k3s/server/tls
       register: cert_check
       failed_when: cert_check.rc != 0
 
