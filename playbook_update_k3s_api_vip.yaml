@@ -12,6 +12,13 @@
     primer_master: "{{ groups['masters'][0] }}"
 
   tasks:
+    # --- Limpiar procesos huérfanos antes de reiniciar ---
+    - name: "🚨 Limpiar procesos huérfanos de containerd-shim"
+      raw: |
+        ps aux | grep 'containerd-shim' | awk '{print $2}' | xargs kill -9
+      when: inventory_hostname in groups['masters']
+      ignore_errors: true
+
     # --- Configurar VIP solo en el primer master (idempotente) ---
     - name: "🖥️ Asignar VIP al primer master"
       raw: |
