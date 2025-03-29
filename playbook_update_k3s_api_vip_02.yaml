@@ -1,3 +1,4 @@
+---
 - name: Reemplazar endpoint API por IP VIP y regenerar certificados en masters
   hosts: k8s_cluster
   become: true
@@ -26,16 +27,20 @@
     - name: Reemplazar IP del API server en k3s.yaml
       ansible.builtin.raw: |
         sed -i 's|^server:.*|server: {{ api_vip }}|' /etc/rancher/k3s/k3s.yaml
-      when: '"El archivo k3s.yaml existe" in k3s_yaml_status.stdout'
+      when: "'El archivo k3s.yaml existe' in k3s_yaml_status.stdout"
 
     - name: Regenerar todos los certificados en nodos master
       ansible.builtin.raw: |
         k3s certificate rotate
       when: inventory_hostname in groups['masters']
 
-    - name: Reiniciar k3s
+    - name: Reiniciar k3s o k3s-agent según el nodo
       ansible.builtin.raw: |
-        systemctl restart k3s
+        if systemctl list-units --type=service | grep -q k3s.service; then
+          systemctl restart k3s
+        elif systemctl list-units --type=service | grep -q k3s-agent.service; then
+          systemctl restart k3s-agent
+        fi
 
     - name: Validar conectividad con el API Server por la VIP (solo masters)
       ansible.builtin.raw: |
